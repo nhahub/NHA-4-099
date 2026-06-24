@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CV Parser — Test Client</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0f1117;
+      --surface:   #1a1d27;
+      --border:    #2a2d3a;
+      --accent:    #6c63ff;
+      --accent-dim:#3d3880;
+      --green:     #22c55e;
+      --red:       #ef4444;
+      --yellow:    #f59e0b;
+      --text:      #e2e4ed;
+      --muted:     #6b7280;
+      --radius:    10px;
+      --mono:      "JetBrains Mono", "Fira Code", monospace;
+      --sans:      "Inter", system-ui, sans-serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      grid-template-rows: 56px 1fr;
+    }
+
+    /* ── Header ── */
+    header {
+      grid-column: 1 / -1;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 24px;
+    }
+    header .logo { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; }
+    header .logo span { color: var(--accent); }
+    header .badge {
+      font-size: 11px;
+      background: var(--accent-dim);
+      color: var(--accent);
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+    header .server-status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: background 0.3s;
+    }
+    .dot.online  { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .dot.offline { background: var(--red); }
+
+    /* ── Left panel ── */
+    .panel {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      overflow-y: auto;
+    }
+
+    .section-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    /* Config block */
+    .config-block { display: flex; flex-direction: column; gap: 10px; }
+
+    label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 4px; }
+
+    input[type="text"], input[type="url"] {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 9px 12px;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus { border-color: var(--accent); }
+
+
+
+    /* Send button */
+    .btn-send {
+      width: 100%;
+      padding: 12px;
+      background: var(--accent);
+      border: none;
+      border-radius: var(--radius);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      letter-spacing: 0.3px;
+      transition: opacity 0.2s, transform 0.1s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .btn-send:hover  { opacity: 0.9; }
+    .btn-send:active { transform: scale(0.98); }
+    .btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Right panel ── */
+    .output {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .output-header {
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .output-header h2 { font-size: 14px; font-weight: 600; }
+
+    .status-pill {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 20px;
+      display: none;
+    }
+    .status-pill.success { background: rgba(34,197,94,0.15);  color: var(--green); display: inline-block; }
+    .status-pill.error   { background: rgba(239,68,68,0.15);  color: var(--red);   display: inline-block; }
+    .status-pill.pending { background: rgba(245,158,11,0.15); color: var(--yellow); display: inline-block; }
+
+    .output-tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+    }
+    .output-tabs button {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      padding: 10px 16px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: color 0.2s, border-color 0.2s;
+      margin-bottom: -1px;
+    }
+    .output-tabs button.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    .tab-content { display: none; flex: 1; overflow: auto; padding: 20px 24px; }
+    .tab-content.active { display: block; }
+
+    /* JSON viewer */
+    pre {
+      font-family: var(--mono);
+      font-size: 12.5px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .json-key    { color: #7dd3fc; }
+    .json-str    { color: #86efac; }
+    .json-num    { color: #f9a8d4; }
+    .json-bool   { color: #fde68a; }
+    .json-null   { color: var(--muted); }
+
+    /* Parsed cards */
+    .cards { display: flex; flex-direction: column; gap: 16px; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 10px 16px;
+      background: rgba(108,99,255,0.08);
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+    .card-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+
+    .field { display: flex; gap: 12px; font-size: 13px; }
+    .field-key { color: var(--muted); min-width: 100px; flex-shrink: 0; }
+    .field-val { color: var(--text); word-break: break-word; }
+
+    .tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tag {
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-weight: 500;
+    }
+    .tag.tech { background: rgba(108,99,255,0.15); color: var(--accent); }
+    .tag.soft { background: rgba(34,197,94,0.12);  color: var(--green); }
+    .tag.lang { background: rgba(245,158,11,0.12); color: var(--yellow); }
+
+    .exp-block, .edu-block {
+      border-left: 2px solid var(--accent-dim);
+      padding-left: 12px;
+      margin-bottom: 12px;
+    }
+    .exp-block:last-child, .edu-block:last-child { margin-bottom: 0; }
+    .exp-title { font-size: 13px; font-weight: 600; color: var(--text); }
+    .exp-sub   { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .exp-desc  { font-size: 12px; color: var(--text); margin-top: 6px; opacity: 0.8; }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 12px;
+      color: var(--muted);
+      text-align: center;
+      padding: 40px;
+    }
+    .empty-icon { font-size: 40px; opacity: 0.4; }
+    .empty-state p { font-size: 13px; line-height: 1.6; }
+
+    /* Request log */
+    .log-entry {
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      border-left: 3px solid var(--border);
+    }
+    .log-entry.req  { border-color: var(--accent); background: rgba(108,99,255,0.06); }
+    .log-entry.res  { border-color: var(--green);  background: rgba(34,197,94,0.06); }
+    .log-entry.err  { border-color: var(--red);    background: rgba(239,68,68,0.06); }
+    .log-time { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+
+    @media (max-width: 768px) {
+      body { grid-template-columns: 1fr; grid-template-rows: 56px auto 1fr; }
+      .panel { border-right: none; border-bottom: 1px solid var(--border); }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Career<span>GPS</span></div>
+  <div class="badge">AI TEAM</div>
+  <div class="server-status">
+    <div class="dot" id="statusDot"></div>
+    <span id="statusText">Checking…</span>
+  </div>
+</header>
+
+<aside class="panel">
+
+  <div>
+    <div class="section-label">Pipeline Identifier</div>
+    <div class="config-block">
+      <div>
+        <label>cvId</label>
+        <input type="text" id="cvId" value="" placeholder="auto-generated" />
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="section-label">CV Input</div>
+    <div class="config-block">
+      <div>
+        <label>Cloudinary URL</label>
+        <input type="url" id="cvUrl" placeholder="https://res.cloudinary.com/.../cv.pdf" required />
+      </div>
+    </div>
+  </div>
+
+  <button class="btn-send" id="sendBtn" onclick="sendRequest()">
+    <span class="spinner" id="spinner"></span>
+    <span id="sendLabel">Send to /parse</span>
+  </button>
+
+</aside>
+
+<div class="output">
+  <div class="output-header">
+    <h2>Response</h2>
+    <span class="status-pill" id="statusPill">—</span>
+    <span style="margin-left:auto;font-size:12px;color:var(--muted)" id="responseTime"></span>
+  </div>
+
+  <div class="output-tabs">
+    <button class="active" onclick="switchTab(event, 'parsed')">Parsed View</button>
+    <button onclick="switchTab(event, 'raw')">Raw JSON</button>
+    <button onclick="switchTab(event, 'log')">Request Log</button>
+  </div>
+
+  <div class="tab-content active" id="tab-parsed">
+    <div class="empty-state">
+      <div class="empty-icon">🧬</div>
+      <p>Upload a CV and hit <strong>Send</strong>.<br/>Parsed data will appear here.</p>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-raw">
+    <div class="empty-state">
+      <div class="empty-icon">{ }</div>
+      <p>Raw JSON response will appear here.</p>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-log">
+    <div class="empty-state" id="logEmpty">
+      <div class="empty-icon">📋</div>
+      <p>Request / response log will appear here.</p>
+    </div>
+    <div id="logEntries"></div>
+  </div>
+</div>
+
+<script>
+  // ── State ───────────────────────────────────────────────────────────────────
+  let lastResponse = null;
+
+  // ── Auto-generate cvId ──────────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('cvId').value = crypto.randomUUID();
+  });
+  // Fallback if DOM already loaded (script at end of body)
+  if (document.readyState !== 'loading') {
+    document.getElementById('cvId').value = crypto.randomUUID();
+  }
+
+  // ── Server health check ─────────────────────────────────────────────────────
+  async function checkHealth() {
+    const dot  = document.getElementById('statusDot');
+    const txt  = document.getElementById('statusText');
+    try {
+      const r = await fetch(`/health`, { signal: AbortSignal.timeout(3000) });
+      if (r.ok) {
+        dot.className = 'dot online';
+        txt.textContent = 'Server online';
+      } else {
+        dot.className = 'dot offline';
+        txt.textContent = `Server error (${r.status})`;
+      }
+    } catch {
+      dot.className = 'dot offline';
+      txt.textContent = 'Server offline';
+    }
+  }
+  checkHealth();
+  setInterval(checkHealth, 5000);
+
+  // ── Tabs ────────────────────────────────────────────────────────────────────
+  function switchTab(event, name) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.output-tabs button').forEach(el => el.classList.remove('active'));
+    document.getElementById(`tab-${name}`).classList.add('active');
+    event.target.classList.add('active');
+  }
+
+  // ── Send request ────────────────────────────────────────────────────────────
+  async function sendRequest() {
+    const cvId = document.getElementById('cvId').value.trim() || crypto.randomUUID();
+    const url = document.getElementById('cvUrl').value.trim();
+    if (!url) { alert('Please enter a valid URL.'); return; }
+
+    const headers = { 'Content-Type': 'application/json' };
+    const endpoint = `/parse`;
+    const body = { cvId, url };
+
+    setLoading(true);
+    const t0 = Date.now();
+
+    try {
+      addLog('req', endpoint, body);
+      const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+      
+      const elapsed = Date.now() - t0;
+      const data    = await response.json();
+      lastResponse  = data;
+
+      addLog(response.ok ? 'res' : 'err', `HTTP ${response.status}`, data);
+      showStatus(response.ok, response.status, elapsed);
+      renderRaw(data);
+      renderParsed(data);
+
+      if (response.ok && data.status === 'accepted') {
+          // start polling, do not set loading to false yet
+          setTimeout(() => pollResult(cvId), 2000);
+      } else {
+          setLoading(false);
+      }
+
+      document.getElementById('cvId').value = crypto.randomUUID();
+
+    } catch (err) {
+      addLog('err', 'Network error', { message: err.message });
+      showStatus(false, 'ERR', Date.now() - t0);
+      renderRaw({ error: err.message });
+      setLoading(false);
+    }
+  }
+
+  async function pollResult(cvId) {
+    const endpoint = `/results`;
+    try {
+      const response = await fetch(endpoint, { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cvId: cvId })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        lastResponse = data;
+        addLog('res', `POLL ${response.status}`, data);
+        showStatus(true, response.status, 'Ready');
+        renderRaw(data);
+        renderParsed(data);
+        setLoading(false);
+        return;
+      } else if (response.status !== 404) {
+        const errData = await response.json();
+        addLog('err', `POLL ERR ${response.status}`, errData);
+        showStatus(false, response.status, 'Error');
+        renderRaw(errData);
+        setLoading(false);
+        return;
+      }
+    } catch (e) {
+      console.log('Poll error', e);
+    }
+    // Not ready yet (404), keep polling
+    setTimeout(() => pollResult(cvId), 2000);
+  }
+
+  // ── UI helpers ──────────────────────────────────────────────────────────────
+  function setLoading(on) {
+    document.getElementById('sendBtn').disabled = on;
+    document.getElementById('spinner').style.display = on ? 'block' : 'none';
+    document.getElementById('sendLabel').textContent = on ? 'Sending…' : 'Send to /parse';
+  }
+
+  function showStatus(ok, code, ms) {
+    const pill = document.getElementById('statusPill');
+    pill.className = `status-pill ${ok ? 'success' : 'error'}`;
+    pill.textContent = `${code}`;
+    const timeEl = document.getElementById('responseTime');
+    timeEl.textContent = typeof ms === 'number' ? `${ms}ms` : ms;
+  }
+
+  // ── Raw JSON renderer ────────────────────────────────────────────────────────
+  function renderRaw(data) {
+    const json = JSON.stringify(data, null, 2);
+    const html = json
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"([^"]+)":/g, '<span class="json-key">"$1"</span>:')
+      .replace(/: "([^"]*)"/g, ': <span class="json-str">"$1"</span>')
+      .replace(/: (\d+\.?\d*)/g, ': <span class="json-num">$1</span>')
+      .replace(/: (true|false)/g, ': <span class="json-bool">$1</span>')
+      .replace(/: null/g, ': <span class="json-null">null</span>');
+    document.getElementById('tab-raw').innerHTML = `<pre>${html}</pre>`;
+  }
+
+  // ── Parsed view renderer ─────────────────────────────────────────────────────
+  function renderParsed(data) {
+    const el = document.getElementById('tab-parsed');
+
+    if (data.status === 'accepted') {
+      el.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-icon">⏳</div>
+          <p><strong>202 Accepted</strong><br/>
+          The server is parsing in the background.<br/>
+          Results will be saved locally to your output directory.<br/><br/>
+          <span style="color:var(--accent);font-family:var(--mono);font-size:12px">${data.message || ''}</span>
+          </p>
+        </div>`;
+      return;
+    }
+
+    const d = data.parsedData;
+    if (!d) { el.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`; return; }
+
+    el.innerHTML = `<div class="cards">
+
+      <div class="card">
+        <div class="card-header">Contact</div>
+        <div class="card-body">
+          ${field('Name',     d.fullName)}
+          ${field('Email',    d.email)}
+          ${field('Phone',    d.phone)}
+          ${field('Location', d.location)}
+        </div>
+      </div>
+
+      ${d.summary ? `
+      <div class="card">
+        <div class="card-header">Summary</div>
+        <div class="card-body"><p style="font-size:13px;line-height:1.6">${esc(d.summary)}</p></div>
+      </div>` : ''}
+
+      <div class="card">
+        <div class="card-header">Skills</div>
+        <div class="card-body">
+          ${d.skills?.technical?.length ? `
+            <div class="field"><span class="field-key">Technical</span>
+              <div class="tag-list">${d.skills.technical.map(s => `<span class="tag tech">${esc(s)}</span>`).join('')}</div>
+            </div>` : ''}
+          ${d.skills?.nonTechnical?.length ? `
+            <div class="field"><span class="field-key">Soft</span>
+              <div class="tag-list">${d.skills.nonTechnical.map(s => `<span class="tag soft">${esc(s)}</span>`).join('')}</div>
+            </div>` : ''}
+        </div>
+      </div>
+
+      ${d.experience?.length ? `
+      <div class="card">
+        <div class="card-header">Experience</div>
+        <div class="card-body">
+          ${d.experience.map(e => `
+            <div class="exp-block">
+              <div class="exp-title">${esc(e.title || '—')}</div>
+              <div class="exp-sub">${esc(e.company || '')} ${e.startDate ? `· ${e.startDate}${e.endDate ? ` – ${e.endDate}` : ''}` : ''}</div>
+              ${e.description ? `<div class="exp-desc">${esc(e.description)}</div>` : ''}
+            </div>`).join('')}
+        </div>
+      </div>` : ''}
+
+      ${d.education?.length ? `
+      <div class="card">
+        <div class="card-header">Education</div>
+        <div class="card-body">
+          ${d.education.map(e => `
+            <div class="edu-block">
+              <div class="exp-title">${esc(e.degree || '')} ${e.field ? `in ${esc(e.field)}` : ''}</div>
+              <div class="exp-sub">${esc(e.institution || '')} ${e.startDate ? `· ${e.startDate}${e.endDate ? ` – ${e.endDate}` : ''}` : ''}</div>
+            </div>`).join('')}
+        </div>
+      </div>` : ''}
+
+      ${d.languages?.length ? `
+      <div class="card">
+        <div class="card-header">Languages</div>
+        <div class="card-body">
+          <div class="tag-list">${d.languages.map(l => `<span class="tag lang">${esc(l)}</span>`).join('')}</div>
+        </div>
+      </div>` : ''}
+
+    </div>`;
+  }
+
+  function field(key, val) {
+    if (!val) return '';
+    return `<div class="field"><span class="field-key">${key}</span><span class="field-val">${esc(val)}</span></div>`;
+  }
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function addLog(type, label, data) {
+    document.getElementById('logEmpty').style.display = 'none';
+    const time = new Date().toLocaleTimeString();
+    const entry = document.createElement('div');
+    entry.className = `log-entry ${type}`;
+    entry.innerHTML = `
+      <div class="log-time">${time} · ${label}</div>
+      <pre>${JSON.stringify(data, null, 2)}</pre>`;
+    document.getElementById('logEntries').prepend(entry);
+  }
+</script>
+</body>
+</html>

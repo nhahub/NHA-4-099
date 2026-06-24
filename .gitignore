@@ -1,0 +1,22 @@
+# Local data and output files (from your rewritten config.py)
+data/
+parsed_output/
+*.json
+*.pdf
+*.txt
+
+# Python cache & environments
+__pycache__/
+*.pyc
+.env
+venv/
+.venv/
+env/
+
+# Transformer / Hugging Face local cache folders
+.hf_cache/
+.cache/
+
+# OS-specific garbage
+.DS_Store
+Thumbs.db
