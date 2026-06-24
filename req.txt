@@ -5,4 +5,5 @@ pydantic[email]>=2.7.0
 sentence-transformers>=3.0.0
 spacy>=3.7.0
 python-dotenv
+pypdf
 # After install: python -m spacy download en_core_web_sm
