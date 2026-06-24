@@ -2,42 +2,57 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import spacy
-from sentence_transformers import SentenceTransformer, util
+import requests
 
+import config
 from Schemas import Education, Experience, ParsedData, Skills
 
 logger = logging.getLogger("parser")
 
-# ── Singletons ─────────────────────────────────────────────────────────────────
-_sentence_model: Optional[SentenceTransformer] = None
-_nlp: Any = None
+
+# ── HF Inference API helpers ───────────────────────────────────────────────────
+
+def _hf_post(url: str, payload: dict, retries: int = 3) -> Any:
+    """POST to HF Inference API with retry on 503 (model loading)."""
+    for attempt in range(retries):
+        response = requests.post(url, headers=config.HF_HEADERS, json=payload, timeout=60)
+        if response.status_code == 503:
+            wait = int(response.headers.get("X-Wait-For-Model", 20))
+            logger.warning("Model loading, waiting %ds (attempt %d)…", wait, attempt + 1)
+            time.sleep(wait)
+            continue
+        response.raise_for_status()
+        return response.json()
+    raise RuntimeError(f"HF API unavailable after {retries} retries: {url}")
+
+
+def _get_embeddings(texts: List[str]) -> List[List[float]]:
+    """Get sentence embeddings via HF Inference API."""
+    result = _hf_post(
+        config.HF_EMBEDDING_URL,
+        {"inputs": texts, "options": {"wait_for_model": True}},
+    )
+    return result
+
+
+def _cosine_sim(a: List[float], b: List[float]) -> float:
+    dot   = sum(x * y for x, y in zip(a, b))
+    mag_a = sum(x ** 2 for x in a) ** 0.5
+    mag_b = sum(x ** 2 for x in b) ** 0.5
+    return dot / (mag_a * mag_b + 1e-9)
 
 
 def load_models() -> None:
-    global _sentence_model, _nlp
-
-    logger.info("Loading SentenceTransformer …")
-    _sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
-    logger.info("SentenceTransformer loaded.")
-
-    for name in ("en_core_web_lg", "en_core_web_sm"):
-        try:
-            _nlp = spacy.load(name)
-            logger.info("spaCy '%s' loaded.", name)
-            return
-        except OSError:
-            logger.warning("spaCy '%s' not found, trying next.", name)
-
-    raise RuntimeError("No spaCy model found. Run: python -m spacy download en_core_web_sm")
+    """No local models to load — using HF Inference API."""
+    logger.info("Using HF Inference API — no local models needed.")
 
 
 def unload_models() -> None:
-    global _sentence_model, _nlp
-    _sentence_model = None
-    _nlp = None
+    """No local models to unload."""
+    logger.info("HF Inference API — nothing to unload.")
 
 
 # ── Regex ──────────────────────────────────────────────────────────────────────
@@ -96,7 +111,53 @@ def _extract_phone(text: str) -> Optional[str]:
     return None
 
 
-# ── Section bucketing ──────────────────────────────────────────────────────────
+# ── NER via HF API ─────────────────────────────────────────────────────────────
+
+def _run_ner(text: str) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {"PERSON": [], "ORG": [], "GPE": [], "LOC": []}
+    try:
+        entities = _hf_post(
+            config.HF_NER_URL,
+            {"inputs": text[:512], "options": {"wait_for_model": True}},
+        )
+        # Map bert-base-NER labels to our keys
+        label_map = {
+            "PER": "PERSON",
+            "ORG": "ORG",
+            "LOC": "LOC",
+            "MISC": "GPE",
+        }
+        current_entity: Dict[str, str] = {}
+        for ent in entities:
+            label = ent.get("entity", "")
+            word  = ent.get("word", "").replace("##", "")
+            tag   = label.split("-")[-1]  # B-PER → PER
+            key   = label_map.get(tag)
+            if not key:
+                continue
+            if label.startswith("B-") or not current_entity:
+                if current_entity:
+                    k = current_entity["key"]
+                    v = current_entity["value"].strip()
+                    if v and v not in out[k]:
+                        out[k].append(v)
+                current_entity = {"key": key, "value": word}
+            else:
+                current_entity["value"] += word
+
+        if current_entity:
+            k = current_entity["key"]
+            v = current_entity["value"].strip()
+            if v and v not in out[k]:
+                out[k].append(v)
+
+    except Exception as exc:
+        logger.error("NER API failed: %s", exc)
+
+    return out
+
+
+# ── Section bucketing via embeddings ──────────────────────────────────────────
 _SECTION_ANCHORS: Dict[str, List[str]] = {
     "summary":    ["professional summary", "about me", "career objective", "profile overview"],
     "skills":     ["technical skills", "programming languages", "core competencies", "tools technologies"],
@@ -109,7 +170,7 @@ _SIM_THRESHOLD = 0.35
 
 def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
     buckets: Dict[str, List[str]] = {k: [] for k in _SECTION_ANCHORS}
-    if not _sentence_model or not lines:
+    if not lines:
         return buckets
 
     anchor_labels, anchor_texts = [], []
@@ -118,41 +179,30 @@ def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
             anchor_labels.append(label)
             anchor_texts.append(a)
 
-    anchor_embs = _sentence_model.encode(anchor_texts, convert_to_tensor=True)
-    line_embs   = _sentence_model.encode(lines,        convert_to_tensor=True)
-    sims        = util.pytorch_cos_sim(line_embs, anchor_embs)
+    try:
+        all_texts    = anchor_texts + lines
+        all_embeddings = _get_embeddings(all_texts)
+        anchor_embs  = all_embeddings[:len(anchor_texts)]
+        line_embs    = all_embeddings[len(anchor_texts):]
 
-    for i, line in enumerate(lines):
-        best_idx = int(sims[i].argmax().item())
-        if float(sims[i][best_idx].item()) >= _SIM_THRESHOLD:
-            buckets[anchor_labels[best_idx]].append(line)
+        for i, line in enumerate(lines):
+            best_score = -1.0
+            best_label = None
+            for j, a_emb in enumerate(anchor_embs):
+                score = _cosine_sim(line_embs[i], a_emb)
+                if score > best_score:
+                    best_score = score
+                    best_label = anchor_labels[j]
+            if best_score >= _SIM_THRESHOLD and best_label:
+                buckets[best_label].append(line)
+
+    except Exception as exc:
+        logger.error("Embedding API failed: %s", exc)
 
     return buckets
 
 
-# ── NER ────────────────────────────────────────────────────────────────────────
-def _run_ner(text: str) -> Dict[str, List[str]]:
-    out: Dict[str, List[str]] = {"PERSON": [], "ORG": [], "GPE": [], "LOC": []}
-    if not _nlp:
-        return out
-    doc = _nlp(text[:10_000])
-    for ent in doc.ents:
-        if ent.label_ in out:
-            out[ent.label_].append(ent.text.strip())
-    return out
-
-
 # ── Skills ─────────────────────────────────────────────────────────────────────
-_TECH = {
-    "python", "javascript", "typescript", "java", "c++", "c#", "go", "rust",
-    "php", "ruby", "swift", "kotlin", "scala", "r", "sql", "bash", "react",
-    "vue", "angular", "svelte", "html", "css", "sass", "tailwind", "next.js",
-    "nuxt", "webpack", "vite", "node.js", "django", "flask", "fastapi",
-    "spring", "laravel", "express", "aws", "azure", "gcp", "docker",
-    "kubernetes", "terraform", "git", "postgresql", "mysql", "mongodb",
-    "redis", "elasticsearch", "machine learning", "deep learning",
-    "tensorflow", "pytorch", "pandas", "numpy", "scikit-learn", "spark", "kafka",
-}
 _SOFT = {
     "teamwork", "communication", "leadership", "problem solving", "problem-solving",
     "critical thinking", "creativity", "adaptability", "time management",
@@ -165,7 +215,6 @@ _SOFT = {
 def _classify_skills(lines: List[str]) -> Tuple[List[str], List[str]]:
     technical, non_technical = [], []
     for line in lines:
-        # Strip only a leading "Label: " or "Label - " prefix (word chars up to first colon/dash)
         cleaned = re.sub(r"^[A-Za-z ]{1,30}[:\-]\s*", "", line, count=1)
         for part in re.split(r"[,|•·\t]+", cleaned):
             p = part.strip(" -–•·\t")
