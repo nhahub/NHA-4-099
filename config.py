@@ -12,11 +12,3 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 # Force Hugging Face transformers cache to a writeable directory
 os.environ.setdefault("HF_HOME", "/tmp/hf_cache")
-
-
-# ── App Paths (Updated for Hugging Face Read-Only Filesystem) ──────────────────
-OUTPUT_DIR = "/tmp/parsed_output"
-DATA_DIR   = "/tmp/data"
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(DATA_DIR,   exist_ok=True)
