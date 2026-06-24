@@ -1,8 +1,8 @@
 import io
-import json
 import logging
 import multiprocessing
 import os
+from typing import Any, Dict
 
 import uvicorn
 from contextlib import asynccontextmanager
@@ -12,16 +12,19 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from pypdf import PdfReader
 
-import config  
+import config
 import parsing_test
 from loader import download_file
-from Schemas import ParseAccepted
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
 )
 logger = logging.getLogger("main")
+
+
+# ── In-Memory Storage ──────────────────────────────────────────────────────────
+results_store: Dict[str, Any] = {}
 
 
 # ── File helpers ───────────────────────────────────────────────────────────────
@@ -44,25 +47,10 @@ def _extract_text_from_bytes(data: bytes, filename: str) -> str:
         raise ValueError(f"Unsupported file type: {ext}. Use PDF or TXT.")
 
 
-# ── Storage ────────────────────────────────────────────────────────────────────
-
-def _save_json_locally(cv_id: str, data: dict) -> None:
-    safe = "".join(c for c in cv_id if c.isalnum() or c in ("-", "_")).strip() or "unknown_cv"
-    path = os.path.join(config.OUTPUT_DIR, f"{safe}.json")
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-        logger.info("Saved JSON — path=%s", path)
-    except Exception as exc:
-        logger.error("Failed to save JSON — cvId=%s: %s", cv_id, exc)
-
-
 # ── Lifespan ───────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-    logger.info("Output directory: %s", os.path.abspath(config.OUTPUT_DIR))
     logger.info("Loading models …")
     parsing_test.load_models()
     logger.info("Models ready.")
@@ -77,9 +65,9 @@ app = FastAPI(
     title="CareerGPS — CV Parsing Service",
     version="2.0.0",
     description=(
-        "Async CV parsing service. "
-        "POST a Cloudinary URL to /parse, "
-        "then poll /results/{cvId} for the result."
+        "CV parsing service. "
+        "POST a file URL to /parse, "
+        "then POST cvId to /results to get the parsed data."
     ),
     lifespan=lifespan,
 )
@@ -99,17 +87,20 @@ async def unhandled(_: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=500, content={"status": "error", "detail": "Internal server error"})
 
 
-# ── Endpoints ──────────────────────────────────────────────────────────────────
+# ── Health ─────────────────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["Health"])
 def health():
     return {"status": "ok"}
 
 
-def serve_html(filename: str = "app.html") -> HTMLResponse:
-    path = os.path.abspath(os.path.join("UI", filename))
+# ── UI ─────────────────────────────────────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse)
+def root():
+    path = os.path.abspath(os.path.join("UI", "app.html"))
     if not os.path.exists(path):
-        raise HTTPException(404, detail=f"{filename} not found")
+        raise HTTPException(404, detail="app.html not found")
     with open(path, "rb") as fh:
         raw = fh.read()
     try:
@@ -119,29 +110,21 @@ def serve_html(filename: str = "app.html") -> HTMLResponse:
     return HTMLResponse(content=content)
 
 
-@app.get("/", response_class=HTMLResponse)
-def root():
-    return serve_html()
-
-
-# ── URL-based Parse endpoint ───────────────────────────────────────────────────
+# ── Request Models ─────────────────────────────────────────────────────────────
 
 class UrlParseRequest(BaseModel):
     url: str
     cvId: str
 
 
-@app.post(
-    "/parse",
-    response_model=ParseAccepted,
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Provide a Cloudinary (or any direct) URL to a CV file for parsing",
-    tags=["CV Pipeline"],
-)
-async def parse_cv(
-    request: UrlParseRequest,
-    background_tasks: BackgroundTasks,
-) -> JSONResponse:
+class ResultRequest(BaseModel):
+    cvId: str
+
+
+# ── Parse Endpoint ─────────────────────────────────────────────────────────────
+
+@app.post("/parse", status_code=status.HTTP_202_ACCEPTED, tags=["CV Pipeline"])
+async def parse_cv(request: UrlParseRequest, background_tasks: BackgroundTasks) -> JSONResponse:
     try:
         file_path = download_file(request.url)
     except Exception as exc:
@@ -150,7 +133,6 @@ async def parse_cv(
     with open(file_path, "rb") as f:
         content = f.read()
 
-    # Use the original URL to determine file type, not the temp download path
     url_filename = request.url.split("?")[0].rstrip("/").split("/")[-1] or file_path
     try:
         cv_text = _extract_text_from_bytes(content, url_filename)
@@ -160,57 +142,49 @@ async def parse_cv(
     if len(cv_text.strip()) < 10:
         raise HTTPException(400, detail="Could not extract enough text from the downloaded file.")
 
-    async def _parse_and_save():
+    results_store[request.cvId] = {"status": "processing"}
+
+    async def _parse_and_store():
         try:
-            logger.info("Parsing started — cvId=%s", request.cvId)
             parsed_data = parsing_test.parse(cv_text)
-            
-            if hasattr(parsed_data, "model_dump"):
-                parsed_dict = parsed_data.model_dump()
-            elif hasattr(parsed_data, "dict"):
-                parsed_dict = parsed_data.dict()
-            else:
-                parsed_dict = parsed_data
-                
-            _save_json_locally(request.cvId, {"cvId": request.cvId, "status": "completed", "parsedData": parsed_dict})
+            parsed_dict = parsed_data.model_dump() if hasattr(parsed_data, "model_dump") else parsed_data
+            results_store[request.cvId] = {
+                "cvId": request.cvId,
+                "status": "completed",
+                "parsedData": parsed_dict,
+            }
             logger.info("Parsing complete — cvId=%s", request.cvId)
         except Exception as exc:
             logger.error("Parsing failed — cvId=%s: %s", request.cvId, exc, exc_info=True)
-            _save_json_locally(request.cvId, {"cvId": request.cvId, "status": "failed", "error": str(exc)})
+            results_store[request.cvId] = {
+                "cvId": request.cvId,
+                "status": "failed",
+                "error": str(exc),
+            }
 
-    background_tasks.add_task(_parse_and_save)
+    background_tasks.add_task(_parse_and_store)
     return JSONResponse(
-        status_code=status.HTTP_202_ACCEPTED,
-        content=ParseAccepted(cvId=request.cvId).model_dump(),
+        status_code=202,
+        content={"cvId": request.cvId, "status": "processing"},
     )
 
 
-# ── Fetch Results endpoint ─────────────────────────────────────────────────────
+# ── Results Endpoint ───────────────────────────────────────────────────────────
 
-class ResultRequest(BaseModel):
-    cvId: str
+@app.post("/results", tags=["CV Pipeline"])
+def get_result(request: ResultRequest) -> JSONResponse:
+    data = results_store.get(request.cvId)
 
-
-@app.post("/results", summary="Retrieve and print parsing result by cvId", tags=["CV Pipeline"])
-def get_result(request: ResultRequest):
-    safe = "".join(c for c in request.cvId if c.isalnum() or c in ("-", "_")).strip()
-    path = os.path.join(config.OUTPUT_DIR, f"{safe}.json")
-    
-    if not os.path.exists(path):
+    if not data:
         raise HTTPException(404, detail="Result not ready yet or cvId invalid")
-        
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            result_data = json.load(f)
-    except json.JSONDecodeError:
-        raise HTTPException(500, detail="Result file is corrupted or incomplete.")
-        
-    # Pretty-print the data inside your server terminal console
-    print("\n" + "="*50 + f"\n[PARSED DATA FOR cvId: {request.cvId}]\n" + "="*50)
-    print(json.dumps(result_data, indent=4, ensure_ascii=False))
-    print("="*50 + "\n")
-    
-    return result_data
+
+    if data.get("status") == "processing":
+        raise HTTPException(202, detail="Still processing, try again shortly")
+
+    # Delete from memory after returning
+    results_store.pop(request.cvId, None)
+
+    return JSONResponse(status_code=200, content=data)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
