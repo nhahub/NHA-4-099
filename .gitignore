@@ -3,7 +3,6 @@ data/
 parsed_output/
 *.json
 *.pdf
-*.txt
 
 # Python cache & environments
 __pycache__/
