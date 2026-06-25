@@ -86,14 +86,6 @@ async def unhandled(_: Request, exc: Exception) -> JSONResponse:
     logger.error("Unhandled error: %s", exc, exc_info=True)
     return JSONResponse(status_code=500, content={"status": "error", "detail": "Internal server error"})
 
-
-# ── Health ─────────────────────────────────────────────────────────────────────
-
-@app.get("/health", tags=["Health"])
-def health():
-    return {"status": "ok"}
-
-
 # ── UI ─────────────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
