@@ -12,11 +12,22 @@ from Schemas import Education, Experience, ParsedData, Skills
 
 logger = logging.getLogger("parser")
 
+# ── Singletons (kept for API compatibility) ────────────────────────────────────
+_sentence_model = None
+_nlp = None
+
+
+def load_models() -> None:
+    logger.info("Using HF Inference API — no local models needed.")
+
+
+def unload_models() -> None:
+    logger.info("HF Inference API — nothing to unload.")
+
 
 # ── HF Inference API helpers ───────────────────────────────────────────────────
 
 def _hf_post(url: str, payload: dict, retries: int = 3) -> Any:
-    """POST to HF Inference API with retry on 503 (model loading)."""
     for attempt in range(retries):
         response = requests.post(url, headers=config.HF_HEADERS, json=payload, timeout=60)
         if response.status_code == 503:
@@ -30,12 +41,10 @@ def _hf_post(url: str, payload: dict, retries: int = 3) -> Any:
 
 
 def _get_embeddings(texts: List[str]) -> List[List[float]]:
-    """Get sentence embeddings via HF Inference API."""
-    result = _hf_post(
+    return _hf_post(
         config.HF_EMBEDDING_URL,
         {"inputs": texts, "options": {"wait_for_model": True}},
     )
-    return result
 
 
 def _cosine_sim(a: List[float], b: List[float]) -> float:
@@ -43,16 +52,6 @@ def _cosine_sim(a: List[float], b: List[float]) -> float:
     mag_a = sum(x ** 2 for x in a) ** 0.5
     mag_b = sum(x ** 2 for x in b) ** 0.5
     return dot / (mag_a * mag_b + 1e-9)
-
-
-def load_models() -> None:
-    """No local models to load — using HF Inference API."""
-    logger.info("Using HF Inference API — no local models needed.")
-
-
-def unload_models() -> None:
-    """No local models to unload."""
-    logger.info("HF Inference API — nothing to unload.")
 
 
 # ── Regex ──────────────────────────────────────────────────────────────────────
@@ -111,53 +110,7 @@ def _extract_phone(text: str) -> Optional[str]:
     return None
 
 
-# ── NER via HF API ─────────────────────────────────────────────────────────────
-
-def _run_ner(text: str) -> Dict[str, List[str]]:
-    out: Dict[str, List[str]] = {"PERSON": [], "ORG": [], "GPE": [], "LOC": []}
-    try:
-        entities = _hf_post(
-            config.HF_NER_URL,
-            {"inputs": text[:512], "options": {"wait_for_model": True}},
-        )
-        # Map bert-base-NER labels to our keys
-        label_map = {
-            "PER": "PERSON",
-            "ORG": "ORG",
-            "LOC": "LOC",
-            "MISC": "GPE",
-        }
-        current_entity: Dict[str, str] = {}
-        for ent in entities:
-            label = ent.get("entity", "")
-            word  = ent.get("word", "").replace("##", "")
-            tag   = label.split("-")[-1]  # B-PER → PER
-            key   = label_map.get(tag)
-            if not key:
-                continue
-            if label.startswith("B-") or not current_entity:
-                if current_entity:
-                    k = current_entity["key"]
-                    v = current_entity["value"].strip()
-                    if v and v not in out[k]:
-                        out[k].append(v)
-                current_entity = {"key": key, "value": word}
-            else:
-                current_entity["value"] += word
-
-        if current_entity:
-            k = current_entity["key"]
-            v = current_entity["value"].strip()
-            if v and v not in out[k]:
-                out[k].append(v)
-
-    except Exception as exc:
-        logger.error("NER API failed: %s", exc)
-
-    return out
-
-
-# ── Section bucketing via embeddings ──────────────────────────────────────────
+# ── Section bucketing ──────────────────────────────────────────────────────────
 _SECTION_ANCHORS: Dict[str, List[str]] = {
     "summary":    ["professional summary", "about me", "career objective", "profile overview"],
     "skills":     ["technical skills", "programming languages", "core competencies", "tools technologies"],
@@ -180,10 +133,9 @@ def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
             anchor_texts.append(a)
 
     try:
-        all_texts    = anchor_texts + lines
-        all_embeddings = _get_embeddings(all_texts)
-        anchor_embs  = all_embeddings[:len(anchor_texts)]
-        line_embs    = all_embeddings[len(anchor_texts):]
+        all_embeddings = _get_embeddings(anchor_texts + lines)
+        anchor_embs    = all_embeddings[:len(anchor_texts)]
+        line_embs      = all_embeddings[len(anchor_texts):]
 
         for i, line in enumerate(lines):
             best_score = -1.0
@@ -202,7 +154,53 @@ def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
     return buckets
 
 
+# ── NER ────────────────────────────────────────────────────────────────────────
+def _run_ner(text: str) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {"PERSON": [], "ORG": [], "GPE": [], "LOC": []}
+    try:
+        entities = _hf_post(
+            config.HF_NER_URL,
+            {"inputs": text[:512], "options": {"wait_for_model": True}},
+        )
+        label_map = {"PER": "PERSON", "ORG": "ORG", "LOC": "LOC", "MISC": "GPE"}
+        current_entity: Dict[str, str] = {}
+        for ent in entities:
+            label = ent.get("entity", "")
+            word  = ent.get("word", "").replace("##", "")
+            tag   = label.split("-")[-1]
+            key   = label_map.get(tag)
+            if not key:
+                continue
+            if label.startswith("B-") or not current_entity:
+                if current_entity:
+                    k = current_entity["key"]
+                    v = current_entity["value"].strip()
+                    if v and v not in out[k]:
+                        out[k].append(v)
+                current_entity = {"key": key, "value": word}
+            else:
+                current_entity["value"] += word
+        if current_entity:
+            k = current_entity["key"]
+            v = current_entity["value"].strip()
+            if v and v not in out[k]:
+                out[k].append(v)
+    except Exception as exc:
+        logger.error("NER API failed: %s", exc)
+    return out
+
+
 # ── Skills ─────────────────────────────────────────────────────────────────────
+_TECH = {
+    "python", "javascript", "typescript", "java", "c++", "c#", "go", "rust",
+    "php", "ruby", "swift", "kotlin", "scala", "r", "sql", "bash", "react",
+    "vue", "angular", "svelte", "html", "css", "sass", "tailwind", "next.js",
+    "nuxt", "webpack", "vite", "node.js", "django", "flask", "fastapi",
+    "spring", "laravel", "express", "aws", "azure", "gcp", "docker",
+    "kubernetes", "terraform", "git", "postgresql", "mysql", "mongodb",
+    "redis", "elasticsearch", "machine learning", "deep learning",
+    "tensorflow", "pytorch", "pandas", "numpy", "scikit-learn", "spark", "kafka",
+}
 _SOFT = {
     "teamwork", "communication", "leadership", "problem solving", "problem-solving",
     "critical thinking", "creativity", "adaptability", "time management",
