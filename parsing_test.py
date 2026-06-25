@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import time
 import requests
 
 import config
@@ -12,20 +12,10 @@ from Schemas import Education, Experience, ParsedData, Skills
 
 logger = logging.getLogger("parser")
 
-# ── Singletons (kept for API compatibility) ────────────────────────────────────
+# ── HF Inference API ───────────────────────────────────────────────────────────
 _sentence_model = None
 _nlp = None
 
-
-def load_models() -> None:
-    logger.info("Using HF Inference API — no local models needed.")
-
-
-def unload_models() -> None:
-    logger.info("HF Inference API — nothing to unload.")
-
-
-# ── HF Inference API helpers ───────────────────────────────────────────────────
 
 def _hf_post(url: str, payload: dict, retries: int = 3) -> Any:
     for attempt in range(retries):
@@ -40,18 +30,12 @@ def _hf_post(url: str, payload: dict, retries: int = 3) -> Any:
     raise RuntimeError(f"HF API unavailable after {retries} retries: {url}")
 
 
-def _get_embeddings(texts: List[str]) -> List[List[float]]:
-    return _hf_post(
-        config.HF_EMBEDDING_URL,
-        {"inputs": texts, "options": {"wait_for_model": True}},
-    )
+def load_models() -> None:
+    logger.info("Using HF Inference API — no local models needed.")
 
 
-def _cosine_sim(a: List[float], b: List[float]) -> float:
-    dot   = sum(x * y for x, y in zip(a, b))
-    mag_a = sum(x ** 2 for x in a) ** 0.5
-    mag_b = sum(x ** 2 for x in b) ** 0.5
-    return dot / (mag_a * mag_b + 1e-9)
+def unload_models() -> None:
+    logger.info("HF Inference API — nothing to unload.")
 
 
 # ── Regex ──────────────────────────────────────────────────────────────────────
@@ -121,6 +105,13 @@ _SECTION_ANCHORS: Dict[str, List[str]] = {
 _SIM_THRESHOLD = 0.35
 
 
+def _cosine_sim(a: List[float], b: List[float]) -> float:
+    dot   = sum(x * y for x, y in zip(a, b))
+    mag_a = sum(x ** 2 for x in a) ** 0.5
+    mag_b = sum(x ** 2 for x in b) ** 0.5
+    return dot / (mag_a * mag_b + 1e-9)
+
+
 def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
     buckets: Dict[str, List[str]] = {k: [] for k in _SECTION_ANCHORS}
     if not lines:
@@ -133,21 +124,18 @@ def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
             anchor_texts.append(a)
 
     try:
-        all_embeddings = _get_embeddings(anchor_texts + lines)
-        anchor_embs    = all_embeddings[:len(anchor_texts)]
-        line_embs      = all_embeddings[len(anchor_texts):]
+        all_embeddings = _hf_post(
+            config.HF_EMBEDDING_URL,
+            {"inputs": anchor_texts + lines, "options": {"wait_for_model": True}},
+        )
+        anchor_embs = all_embeddings[:len(anchor_texts)]
+        line_embs   = all_embeddings[len(anchor_texts):]
 
         for i, line in enumerate(lines):
-            best_score = -1.0
-            best_label = None
-            for j, a_emb in enumerate(anchor_embs):
-                score = _cosine_sim(line_embs[i], a_emb)
-                if score > best_score:
-                    best_score = score
-                    best_label = anchor_labels[j]
-            if best_score >= _SIM_THRESHOLD and best_label:
-                buckets[best_label].append(line)
-
+            best_idx   = max(range(len(anchor_embs)), key=lambda j: _cosine_sim(line_embs[i], anchor_embs[j]))
+            best_score = _cosine_sim(line_embs[i], anchor_embs[best_idx])
+            if best_score >= _SIM_THRESHOLD:
+                buckets[anchor_labels[best_idx]].append(line)
     except Exception as exc:
         logger.error("Embedding API failed: %s", exc)
 
@@ -213,6 +201,7 @@ _SOFT = {
 def _classify_skills(lines: List[str]) -> Tuple[List[str], List[str]]:
     technical, non_technical = [], []
     for line in lines:
+        # Strip only a leading "Label: " or "Label - " prefix (word chars up to first colon/dash)
         cleaned = re.sub(r"^[A-Za-z ]{1,30}[:\-]\s*", "", line, count=1)
         for part in re.split(r"[,|•·\t]+", cleaned):
             p = part.strip(" -–•·\t")
