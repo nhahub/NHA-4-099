@@ -1,6 +1,6 @@
 ---
 title: Parser V1
-emoji: 😻
+emoji: 🚀
 colorFrom: purple
 colorTo: gray
 sdk: docker
