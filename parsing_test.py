@@ -6,18 +6,22 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import math
 import time
-import requests
+from huggingface_hub import InferenceClient
 
 import config
 from Schemas import Education, Experience, ParsedData, Skills
 
 logger = logging.getLogger("parser")
 
+# Initialize the client. It automatically uses config.HF_TOKEN
+client = InferenceClient(token=config.HF_TOKEN)
+
 def load_models() -> None:
     logger.info("Pinging Hugging Face Inference APIs to wake them up...")
     try:
-        requests.post(config.HF_EMBEDDING_URL, headers=config.HF_HEADERS, json={"inputs": ["wake up"]}, timeout=5)
-        requests.post(config.HF_NER_URL, headers=config.HF_HEADERS, json={"inputs": "wake up"}, timeout=5)
+        # Pinging using the official client endpoints
+        client.feature_extraction("wake up", model=config.HF_EMBEDDING_URL)
+        client.token_classification("wake up", model=config.HF_NER_URL)
         logger.info("HF APIs pinged.")
     except Exception as e:
         logger.warning("Failed to ping HF APIs: %s", e)
@@ -25,26 +29,37 @@ def load_models() -> None:
 def unload_models() -> None:
     pass
 
-def _call_hf_api(url: str, json_data: dict, max_retries: int = 3) -> Any:
+def _call_hf_api(model_id: str, task: str, json_data: dict, max_retries: int = 3) -> Any:
+    """
+    Wrapper around InferenceClient to match original retry logic and error management.
+    """
     for i in range(max_retries):
         try:
-            resp = requests.post(url, headers=config.HF_HEADERS, json=json_data, timeout=30)
-            if resp.status_code == 503:
+            if task == "embedding":
+                # client.feature_extraction takes a list or string and returns nested lists of floats
+                response = client.feature_extraction(json_data["inputs"], model=model_id)
+                return response
+                
+            elif task == "ner":
+                # client.token_classification returns a structured list of entity dicts
+                response = client.token_classification(
+                    json_data["inputs"], 
+                    model=model_id, 
+                    aggregation_strategy=json_data.get("parameters", {}).get("aggregation_strategy", "simple")
+                )
+                return response
+                
+        except Exception as e:
+            err_msg = str(e).lower()
+            # Handle model loading/503 service unavailable status codes safely through exceptions
+            if ("loading" in err_msg or "503" in err_msg) and i < max_retries - 1:
                 time.sleep(5)
                 continue
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, dict) and "error" in data:
-                if "loading" in str(data.get("error")).lower() and i < max_retries - 1:
-                    time.sleep(5)
-                    continue
-                raise RuntimeError(f"HF API Error: {data['error']}")
-            return data
-        except requests.exceptions.RequestException as e:
             if i < max_retries - 1:
                 time.sleep(3)
                 continue
             raise RuntimeError(f"Request failed: {e}")
+            
     raise RuntimeError("Max retries exceeded for HF API")
 
 def _cos_sim(v1: List[float], v2: List[float]) -> float:
@@ -135,14 +150,14 @@ def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
             anchor_texts.append(a)
 
     try:
-        anchor_embs = _call_hf_api(config.HF_EMBEDDING_URL, {"inputs": anchor_texts})
+        anchor_embs = _call_hf_api(config.HF_EMBEDDING_URL, "embedding", {"inputs": anchor_texts})
         if anchor_embs and isinstance(anchor_embs[0], float):
             anchor_embs = [anchor_embs]
 
         line_embs = []
         for i in range(0, len(lines), 50):
             chunk = lines[i:i+50]
-            embs = _call_hf_api(config.HF_EMBEDDING_URL, {"inputs": chunk})
+            embs = _call_hf_api(config.HF_EMBEDDING_URL, "embedding", {"inputs": chunk})
             if embs and isinstance(embs[0], float):
                 embs = [embs]
             line_embs.extend(embs)
@@ -192,6 +207,7 @@ def _run_ner(text: str) -> Dict[str, List[str]]:
         try:
             entities = _call_hf_api(
                 config.HF_NER_URL,
+                "ner",
                 {
                     "inputs": chunk,
                     "parameters": {"aggregation_strategy": "simple"}
@@ -357,6 +373,7 @@ def parse(cv_text: str) -> ParsedData:
     education  = _parse_education(buckets["education"],  ner["ORG"])
     languages  = _extract_languages(buckets["languages"]) or _extract_languages([], cv_text)
 
+    # Fixed syntax error here: changed trailing } to )
     return ParsedData(
         fullName=ner["PERSON"][0] if ner["PERSON"] else None,
         email=email,

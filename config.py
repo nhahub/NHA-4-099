@@ -19,5 +19,6 @@ if not HF_TOKEN:
 client = InferenceClient(token=HF_TOKEN)
 
 # Define your model names as strings instead of full URLs
-NER_MODEL = "Jean-Baptiste/roberta-large-ner-english"
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# In your config file:
+HF_EMBEDDING_URL = "https://api.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
+HF_NER_URL       = "https://api.huggingface.co/models/Jean-Baptiste/roberta-large-ner-english"
