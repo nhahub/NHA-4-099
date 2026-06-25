@@ -86,14 +86,6 @@ async def unhandled(_: Request, exc: Exception) -> JSONResponse:
     logger.error("Unhandled error: %s", exc, exc_info=True)
     return JSONResponse(status_code=500, content={"status": "error", "detail": "Internal server error"})
 
-
-# ── Health ─────────────────────────────────────────────────────────────────────
-
-@app.get("/health", tags=["Health"])
-def health():
-    return {"status": "ok"}
-
-
 # ── UI ─────────────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -123,8 +115,8 @@ class ResultRequest(BaseModel):
 
 # ── Parse Endpoint ─────────────────────────────────────────────────────────────
 
-@app.post("/parse", status_code=status.HTTP_202_ACCEPTED, tags=["CV Pipeline"])
-async def parse_cv(request: UrlParseRequest, background_tasks: BackgroundTasks) -> JSONResponse:
+@app.post("/parse", tags=["CV Pipeline"])
+async def parse_cv(request: UrlParseRequest) -> JSONResponse:
     try:
         content = download_file(request.url)
     except Exception as exc:
@@ -139,31 +131,26 @@ async def parse_cv(request: UrlParseRequest, background_tasks: BackgroundTasks) 
     if len(cv_text.strip()) < 10:
         raise HTTPException(400, detail="Could not extract enough text from the downloaded file.")
 
-    results_store[request.cvId] = {"status": "processing"}
-
-    async def _parse_and_store():
-        try:
-            parsed_data = parsing_test.parse(cv_text)
-            parsed_dict = parsed_data.model_dump() if hasattr(parsed_data, "model_dump") else parsed_data
-            results_store[request.cvId] = {
-                "cvId": request.cvId,
-                "status": "completed",
-                "parsedData": parsed_dict,
-            }
-            logger.info("Parsing complete — cvId=%s", request.cvId)
-        except Exception as exc:
-            logger.error("Parsing failed — cvId=%s: %s", request.cvId, exc, exc_info=True)
-            results_store[request.cvId] = {
+    try:
+        parsed_data = parsing_test.parse(cv_text)
+        parsed_dict = parsed_data.model_dump() if hasattr(parsed_data, "model_dump") else parsed_data
+        result = {
+            "cvId": request.cvId,
+            "status": "completed",
+            "parsedData": parsed_dict,
+        }
+        logger.info("Parsing complete — cvId=%s", request.cvId)
+        return JSONResponse(status_code=200, content=result)
+    except Exception as exc:
+        logger.error("Parsing failed — cvId=%s: %s", request.cvId, exc, exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
                 "cvId": request.cvId,
                 "status": "failed",
                 "error": str(exc),
             }
-
-    background_tasks.add_task(_parse_and_store)
-    return JSONResponse(
-        status_code=202,
-        content={"cvId": request.cvId, "status": "processing"},
-    )
+        )
 
 
 # ── Results Endpoint ───────────────────────────────────────────────────────────
