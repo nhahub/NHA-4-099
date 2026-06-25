@@ -15,10 +15,9 @@ if not HF_TOKEN:
     raise RuntimeError("HF_TOKEN is not set. Add it to your Space Secrets or .env file.")
 
 # ── HF Inference Client ────────────────────────────────────────────────────────
-# The client handles the base URL and resolves network paths natively inside Spaces
 client = InferenceClient(token=HF_TOKEN)
 
-# Define your model names as strings instead of full URLs
-# In your config file:
-HF_EMBEDDING_URL = "https://api.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
-HF_NER_URL       = "https://api.huggingface.co/models/Jean-Baptiste/roberta-large-ner-english"
+# ── Clean Model Strings (Updated) ──────────────────────────────────────────────
+# Strip the 'https://api-inference.huggingface.co/models/' prefix completely
+HF_EMBEDDING_URL = "sentence-transformers/all-MiniLM-L6-v2"
+HF_NER_URL       = "Jean-Baptiste/roberta-large-ner-english"
