@@ -31,17 +31,19 @@ def unload_models() -> None:
 
 def _call_hf_api(model_id: str, task: str, json_data: dict, max_retries: int = 3) -> Any:
     """
-    Wrapper around InferenceClient to match original retry logic and error management.
+    Wrapper around InferenceClient with retry logic. Forces embeddings into lists 
+    to prevent array truth-value ambiguity errors.
     """
     for i in range(max_retries):
         try:
             if task == "embedding":
-                # client.feature_extraction takes a list or string and returns nested lists of floats
                 response = client.feature_extraction(json_data["inputs"], model=model_id)
+                # Convert NumPy arrays to list safely if returned by the client
+                if hasattr(response, "tolist"):
+                    return response.tolist()
                 return response
                 
             elif task == "ner":
-                # client.token_classification returns a structured list of entity dicts
                 response = client.token_classification(
                     json_data["inputs"], 
                     model=model_id, 
@@ -51,7 +53,6 @@ def _call_hf_api(model_id: str, task: str, json_data: dict, max_retries: int = 3
                 
         except Exception as e:
             err_msg = str(e).lower()
-            # Handle model loading/503 service unavailable status codes safely through exceptions
             if ("loading" in err_msg or "503" in err_msg) and i < max_retries - 1:
                 time.sleep(5)
                 continue
@@ -151,14 +152,15 @@ def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
 
     try:
         anchor_embs = _call_hf_api(config.HF_EMBEDDING_URL, "embedding", {"inputs": anchor_texts})
-        if anchor_embs and isinstance(anchor_embs[0], float):
+        # Explicit length checking fixes ambiguous array evaluation errors
+        if anchor_embs is not None and len(anchor_embs) > 0 and isinstance(anchor_embs[0], float):
             anchor_embs = [anchor_embs]
 
         line_embs = []
         for i in range(0, len(lines), 50):
             chunk = lines[i:i+50]
             embs = _call_hf_api(config.HF_EMBEDDING_URL, "embedding", {"inputs": chunk})
-            if embs and isinstance(embs[0], float):
+            if embs is not None and len(embs) > 0 and isinstance(embs[0], float):
                 embs = [embs]
             line_embs.extend(embs)
     except Exception as e:
@@ -373,7 +375,6 @@ def parse(cv_text: str) -> ParsedData:
     education  = _parse_education(buckets["education"],  ner["ORG"])
     languages  = _extract_languages(buckets["languages"]) or _extract_languages([], cv_text)
 
-    # Fixed syntax error here: changed trailing } to )
     return ParsedData(
         fullName=ner["PERSON"][0] if ner["PERSON"] else None,
         email=email,
