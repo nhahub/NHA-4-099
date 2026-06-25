@@ -4,6 +4,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+import math
 import time
 import requests
 
@@ -12,30 +13,47 @@ from Schemas import Education, Experience, ParsedData, Skills
 
 logger = logging.getLogger("parser")
 
-# ── HF Inference API ───────────────────────────────────────────────────────────
-_sentence_model = None
-_nlp = None
-
-
-def _hf_post(url: str, payload: dict, retries: int = 3) -> Any:
-    for attempt in range(retries):
-        response = requests.post(url, headers=config.HF_HEADERS, json=payload, timeout=60)
-        if response.status_code == 503:
-            wait = int(response.headers.get("X-Wait-For-Model", 20))
-            logger.warning("Model loading, waiting %ds (attempt %d)…", wait, attempt + 1)
-            time.sleep(wait)
-            continue
-        response.raise_for_status()
-        return response.json()
-    raise RuntimeError(f"HF API unavailable after {retries} retries: {url}")
-
-
 def load_models() -> None:
-    logger.info("Using HF Inference API — no local models needed.")
-
+    logger.info("Pinging Hugging Face Inference APIs to wake them up...")
+    try:
+        requests.post(config.HF_EMBEDDING_URL, headers=config.HF_HEADERS, json={"inputs": ["wake up"]}, timeout=5)
+        requests.post(config.HF_NER_URL, headers=config.HF_HEADERS, json={"inputs": "wake up"}, timeout=5)
+        logger.info("HF APIs pinged.")
+    except Exception as e:
+        logger.warning("Failed to ping HF APIs: %s", e)
 
 def unload_models() -> None:
-    logger.info("HF Inference API — nothing to unload.")
+    pass
+
+def _call_hf_api(url: str, json_data: dict, max_retries: int = 3) -> Any:
+    for i in range(max_retries):
+        try:
+            resp = requests.post(url, headers=config.HF_HEADERS, json=json_data, timeout=30)
+            if resp.status_code == 503:
+                time.sleep(5)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, dict) and "error" in data:
+                if "loading" in str(data.get("error")).lower() and i < max_retries - 1:
+                    time.sleep(5)
+                    continue
+                raise RuntimeError(f"HF API Error: {data['error']}")
+            return data
+        except requests.exceptions.RequestException as e:
+            if i < max_retries - 1:
+                time.sleep(3)
+                continue
+            raise RuntimeError(f"Request failed: {e}")
+    raise RuntimeError("Max retries exceeded for HF API")
+
+def _cos_sim(v1: List[float], v2: List[float]) -> float:
+    dot = sum(x * y for x, y in zip(v1, v2))
+    n1 = math.sqrt(sum(x * x for x in v1))
+    n2 = math.sqrt(sum(x * x for x in v2))
+    if n1 == 0 or n2 == 0:
+        return 0.0
+    return dot / (n1 * n2)
 
 
 # ── Regex ──────────────────────────────────────────────────────────────────────
@@ -105,13 +123,6 @@ _SECTION_ANCHORS: Dict[str, List[str]] = {
 _SIM_THRESHOLD = 0.35
 
 
-def _cosine_sim(a: List[float], b: List[float]) -> float:
-    dot   = sum(x * y for x, y in zip(a, b))
-    mag_a = sum(x ** 2 for x in a) ** 0.5
-    mag_b = sum(x ** 2 for x in b) ** 0.5
-    return dot / (mag_a * mag_b + 1e-9)
-
-
 def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
     buckets: Dict[str, List[str]] = {k: [] for k in _SECTION_ANCHORS}
     if not lines:
@@ -124,20 +135,33 @@ def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
             anchor_texts.append(a)
 
     try:
-        all_embeddings = _hf_post(
-            config.HF_EMBEDDING_URL,
-            {"inputs": anchor_texts + lines, "options": {"wait_for_model": True}},
-        )
-        anchor_embs = all_embeddings[:len(anchor_texts)]
-        line_embs   = all_embeddings[len(anchor_texts):]
+        anchor_embs = _call_hf_api(config.HF_EMBEDDING_URL, {"inputs": anchor_texts})
+        if anchor_embs and isinstance(anchor_embs[0], float):
+            anchor_embs = [anchor_embs]
 
-        for i, line in enumerate(lines):
-            best_idx   = max(range(len(anchor_embs)), key=lambda j: _cosine_sim(line_embs[i], anchor_embs[j]))
-            best_score = _cosine_sim(line_embs[i], anchor_embs[best_idx])
-            if best_score >= _SIM_THRESHOLD:
-                buckets[anchor_labels[best_idx]].append(line)
-    except Exception as exc:
-        logger.error("Embedding API failed: %s", exc)
+        line_embs = []
+        for i in range(0, len(lines), 50):
+            chunk = lines[i:i+50]
+            embs = _call_hf_api(config.HF_EMBEDDING_URL, {"inputs": chunk})
+            if embs and isinstance(embs[0], float):
+                embs = [embs]
+            line_embs.extend(embs)
+    except Exception as e:
+        logger.error("Failed to get embeddings: %s", e)
+        return buckets
+
+    for i, line in enumerate(lines):
+        if i >= len(line_embs):
+            break
+        best_sim = -1.0
+        best_idx = -1
+        for j, a_emb in enumerate(anchor_embs):
+            sim = _cos_sim(line_embs[i], a_emb)
+            if sim > best_sim:
+                best_sim = sim
+                best_idx = j
+        if best_sim >= _SIM_THRESHOLD and best_idx != -1:
+            buckets[anchor_labels[best_idx]].append(line)
 
     return buckets
 
@@ -145,36 +169,48 @@ def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
 # ── NER ────────────────────────────────────────────────────────────────────────
 def _run_ner(text: str) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {"PERSON": [], "ORG": [], "GPE": [], "LOC": []}
-    try:
-        entities = _hf_post(
-            config.HF_NER_URL,
-            {"inputs": text[:512], "options": {"wait_for_model": True}},
-        )
-        label_map = {"PER": "PERSON", "ORG": "ORG", "LOC": "LOC", "MISC": "GPE"}
-        current_entity: Dict[str, str] = {}
-        for ent in entities:
-            label = ent.get("entity", "")
-            word  = ent.get("word", "").replace("##", "")
-            tag   = label.split("-")[-1]
-            key   = label_map.get(tag)
-            if not key:
-                continue
-            if label.startswith("B-") or not current_entity:
-                if current_entity:
-                    k = current_entity["key"]
-                    v = current_entity["value"].strip()
-                    if v and v not in out[k]:
-                        out[k].append(v)
-                current_entity = {"key": key, "value": word}
-            else:
-                current_entity["value"] += word
-        if current_entity:
-            k = current_entity["key"]
-            v = current_entity["value"].strip()
-            if v and v not in out[k]:
-                out[k].append(v)
-    except Exception as exc:
-        logger.error("NER API failed: %s", exc)
+    if not text.strip():
+        return out
+    
+    # Split text into manageable chunks roughly 2000 chars long
+    chunks = []
+    current_chunk = []
+    current_len = 0
+    for line in text.splitlines():
+        if current_len + len(line) > 2000:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = [line]
+            current_len = len(line)
+        else:
+            current_chunk.append(line)
+            current_len += len(line)
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    # To avoid rate limits/timeouts, only process the first 3 chunks
+    for chunk in chunks[:3]:
+        try:
+            entities = _call_hf_api(
+                config.HF_NER_URL,
+                {
+                    "inputs": chunk,
+                    "parameters": {"aggregation_strategy": "simple"}
+                }
+            )
+            for ent in entities:
+                label = ent.get("entity_group", ent.get("entity", ""))
+                word = ent.get("word", "").strip()
+                # Clean up word (e.g. remove leading ## from subwords if aggregation didn't fully work)
+                word = word.lstrip("# ")
+                if label in ("PER", "B-PER", "I-PER", "PERSON"):
+                    out["PERSON"].append(word)
+                elif label in ("ORG", "B-ORG", "I-ORG"):
+                    out["ORG"].append(word)
+                elif label in ("LOC", "B-LOC", "I-LOC", "GPE"):
+                    out["GPE"].append(word)
+        except Exception as e:
+            logger.error("Failed to get NER for a chunk: %s", e)
+
     return out
 
 

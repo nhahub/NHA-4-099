@@ -4,3 +4,4 @@ pydantic[email]>=2.7.0
 python-dotenv
 pypdf
 requests
+huggingface-hub>=0.20.0
