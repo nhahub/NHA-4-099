@@ -13,44 +13,46 @@ from Schemas import Education, Experience, ParsedData, Skills
 
 logger = logging.getLogger("parser")
 
-# Initialize the client. It automatically uses config.HF_TOKEN
 client = InferenceClient(token=config.HF_TOKEN)
+
+
+# ── Model lifecycle ────────────────────────────────────────────────────────────
 
 def load_models() -> None:
     logger.info("Pinging Hugging Face Inference APIs to wake them up...")
     try:
-        # Pinging using the official client endpoints
         client.feature_extraction("wake up", model=config.HF_EMBEDDING_URL)
         client.token_classification("wake up", model=config.HF_NER_URL)
         logger.info("HF APIs pinged.")
     except Exception as e:
         logger.warning("Failed to ping HF APIs: %s", e)
 
+
 def unload_models() -> None:
     pass
 
+
+# ── HF API wrapper ─────────────────────────────────────────────────────────────
+
 def _call_hf_api(model_id: str, task: str, json_data: dict, max_retries: int = 3) -> Any:
-    """
-    Wrapper around InferenceClient with retry logic. Forces embeddings into lists 
-    to prevent array truth-value ambiguity errors.
-    """
     for i in range(max_retries):
         try:
             if task == "embedding":
                 response = client.feature_extraction(json_data["inputs"], model=model_id)
-                # Convert NumPy arrays to list safely if returned by the client
                 if hasattr(response, "tolist"):
                     return response.tolist()
                 return response
-                
+
             elif task == "ner":
                 response = client.token_classification(
-                    json_data["inputs"], 
-                    model=model_id, 
-                    aggregation_strategy=json_data.get("parameters", {}).get("aggregation_strategy", "simple")
+                    json_data["inputs"],
+                    model=model_id,
+                    aggregation_strategy=json_data.get("parameters", {}).get(
+                        "aggregation_strategy", "simple"
+                    ),
                 )
                 return response
-                
+
         except Exception as e:
             err_msg = str(e).lower()
             if ("loading" in err_msg or "503" in err_msg) and i < max_retries - 1:
@@ -60,10 +62,44 @@ def _call_hf_api(model_id: str, task: str, json_data: dict, max_retries: int = 3
                 time.sleep(3)
                 continue
             raise RuntimeError(f"Request failed: {e}")
-            
+
     raise RuntimeError("Max retries exceeded for HF API")
 
+
+# ── FIX 1: Safe embedding flattener ───────────────────────────────────────────
+# HF returns [[0.1, 0.2, ...]] for single-input batches instead of [0.1, 0.2, ...].
+# Unwrap until we reach a list of floats.
+
+def _flatten_emb(emb: Any) -> List[float]:
+    """Unwrap nested list wrappers until we reach a 1-D float list."""
+    while isinstance(emb, list) and len(emb) > 0 and isinstance(emb[0], list):
+        emb = emb[0]
+    return emb
+
+
+def _get_embeddings(texts: List[str]) -> List[List[float]]:
+    
+    results: List[List[float]] = []
+    for i in range(0, len(texts), 50):
+        chunk = texts[i : i + 50]
+        raw = _call_hf_api(config.HF_EMBEDDING_URL, "embedding", {"inputs": chunk})
+        # raw may be a single vector (float list) or a batch (list of float lists)
+        if raw is None:
+            results.extend([[] for _ in chunk])
+            continue
+        if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], float):
+            # Single vector returned for a single-item chunk
+            results.append(raw)
+        else:
+            results.extend([_flatten_emb(e) for e in raw])
+    return results
+
+
+# ── Cosine similarity ──────────────────────────────────────────────────────────
+
 def _cos_sim(v1: List[float], v2: List[float]) -> float:
+    if not v1 or not v2:
+        return 0.0
     dot = sum(x * y for x, y in zip(v1, v2))
     n1 = math.sqrt(sum(x * x for x in v1))
     n2 = math.sqrt(sum(x * x for x in v2))
@@ -72,7 +108,8 @@ def _cos_sim(v1: List[float], v2: List[float]) -> float:
     return dot / (n1 * n2)
 
 
-# ── Regex ──────────────────────────────────────────────────────────────────────
+# ── Regex helpers ──────────────────────────────────────────────────────────────
+
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}", re.I)
 _PHONE_RE = re.compile(r"(\+?\d[\d\s\-().]{7,}\d)", re.I)
 _DATE_RANGE_RE = re.compile(
@@ -129,69 +166,125 @@ def _extract_phone(text: str) -> Optional[str]:
 
 
 # ── Section bucketing ──────────────────────────────────────────────────────────
+
+# FIX 6: Added "additional information" and more real-world heading variants
 _SECTION_ANCHORS: Dict[str, List[str]] = {
-    "summary":    ["professional summary", "about me", "career objective", "profile overview"],
-    "skills":     ["technical skills", "programming languages", "core competencies", "tools technologies"],
-    "experience": ["work experience", "employment history", "professional experience", "job responsibilities"],
-    "education":  ["education background", "university degree", "academic history", "studied at"],
-    "languages":  ["languages spoken", "language proficiency", "spoken written languages"],
+    "summary": [
+        "professional summary", "about me", "career objective",
+        "profile overview", "summary", "professional profile", "overview",
+    ],
+    "skills": [
+        "technical skills", "programming languages", "core competencies",
+        "tools technologies", "skills", "additional information",
+        "other information", "key skills", "areas of expertise",
+    ],
+    "experience": [
+        "work experience", "employment history", "professional experience",
+        "job responsibilities", "experience", "career history",
+        "work history", "professional background",
+    ],
+    "education": [
+        "education background", "university degree", "academic history",
+        "studied at", "education", "academic background", "qualifications",
+    ],
+    "languages": [
+        "languages spoken", "language proficiency", "spoken written languages",
+        "languages", "additional information", "linguistic skills",
+    ],
 }
-_SIM_THRESHOLD = 0.35
+
+# FIX 5: Raised from 0.35 → 0.60 to prevent content lines matching anchors
+_SIM_THRESHOLD = 0.60
+
+# Headings are typically short, ALL-CAPS or Title Case, and under 60 chars.
+_HEADING_RE = re.compile(r"^[A-Z][A-Z\s/&]{2,58}$")
+
+
+def _is_heading(line: str) -> bool:
+    
+    stripped = line.strip()
+    if len(stripped) > 60 or len(stripped) < 3:
+        return False
+    # All-caps line (e.g. "WORK EXPERIENCE") or Title Case short phrase
+    if stripped == stripped.upper() and re.search(r"[A-Z]", stripped):
+        return True
+    if _HEADING_RE.match(stripped):
+        return True
+    return False
 
 
 def _bucket_lines(lines: List[str]) -> Dict[str, List[str]]:
+    
     buckets: Dict[str, List[str]] = {k: [] for k in _SECTION_ANCHORS}
     if not lines:
         return buckets
 
-    anchor_labels, anchor_texts = [], []
+    # Build anchor embeddings once
+    anchor_labels: List[str] = []
+    anchor_texts: List[str] = []
     for label, anchors in _SECTION_ANCHORS.items():
         for a in anchors:
             anchor_labels.append(label)
             anchor_texts.append(a)
 
     try:
-        anchor_embs = _call_hf_api(config.HF_EMBEDDING_URL, "embedding", {"inputs": anchor_texts})
-        # Explicit length checking fixes ambiguous array evaluation errors
-        if anchor_embs is not None and len(anchor_embs) > 0 and isinstance(anchor_embs[0], float):
-            anchor_embs = [anchor_embs]
-
-        line_embs = []
-        for i in range(0, len(lines), 50):
-            chunk = lines[i:i+50]
-            embs = _call_hf_api(config.HF_EMBEDDING_URL, "embedding", {"inputs": chunk})
-            if embs is not None and len(embs) > 0 and isinstance(embs[0], float):
-                embs = [embs]
-            line_embs.extend(embs)
+        anchor_embs = _get_embeddings(anchor_texts)
     except Exception as e:
-        logger.error("Failed to get embeddings: %s", e)
+        logger.error("Failed to embed anchors: %s", e)
         return buckets
 
-    for i, line in enumerate(lines):
-        if i >= len(line_embs):
-            break
-        best_sim = -1.0
-        best_idx = -1
-        for j, a_emb in enumerate(anchor_embs):
-            sim = _cos_sim(line_embs[i], a_emb)
+    # FIX 2: Identify heading lines only
+    heading_indices = [i for i, l in enumerate(lines) if _is_heading(l)]
+
+    if not heading_indices:
+        logger.warning("No heading lines detected — falling back to embedding all lines.")
+        heading_indices = list(range(len(lines)))
+
+    heading_texts = [lines[i] for i in heading_indices]
+
+    try:
+        heading_embs = _get_embeddings(heading_texts)
+    except Exception as e:
+        logger.error("Failed to embed heading lines: %s", e)
+        return buckets
+
+    # Map each heading line → best-matching section
+    heading_to_section: Dict[int, str] = {}
+    for idx, (line_idx, emb) in enumerate(zip(heading_indices, heading_embs)):
+        if not emb:
+            continue
+        best_sim, best_label = -1.0, None
+        for a_emb, a_label in zip(anchor_embs, anchor_labels):
+            sim = _cos_sim(emb, a_emb)
             if sim > best_sim:
                 best_sim = sim
-                best_idx = j
-        if best_sim >= _SIM_THRESHOLD and best_idx != -1:
-            buckets[anchor_labels[best_idx]].append(line)
+                best_label = a_label
+        if best_sim >= _SIM_THRESHOLD and best_label:
+            heading_to_section[line_idx] = best_label
+
+    # Pass 2: walk lines, track active section, assign content to bucket
+    active_section: Optional[str] = None
+    for i, line in enumerate(lines):
+        if i in heading_to_section:
+            active_section = heading_to_section[i]
+            # Don't add the raw heading itself to the bucket
+            continue
+        if active_section:
+            buckets[active_section].append(line)
 
     return buckets
 
 
 # ── NER ────────────────────────────────────────────────────────────────────────
+
 def _run_ner(text: str) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {"PERSON": [], "ORG": [], "GPE": [], "LOC": []}
     if not text.strip():
         return out
-    
-    # Split text into manageable chunks roughly 2000 chars long
-    chunks = []
-    current_chunk = []
+
+    # Split into ~2000-char chunks on line boundaries
+    chunks: List[str] = []
+    current_chunk: List[str] = []
     current_len = 0
     for line in text.splitlines():
         if current_len + len(line) > 2000:
@@ -204,22 +297,19 @@ def _run_ner(text: str) -> Dict[str, List[str]]:
     if current_chunk:
         chunks.append("\n".join(current_chunk))
 
-    # To avoid rate limits/timeouts, only process the first 3 chunks
-    for chunk in chunks[:3]:
+    # FIX 3: Process ALL chunks, not just the first 3
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
         try:
             entities = _call_hf_api(
                 config.HF_NER_URL,
                 "ner",
-                {
-                    "inputs": chunk,
-                    "parameters": {"aggregation_strategy": "simple"}
-                }
+                {"inputs": chunk, "parameters": {"aggregation_strategy": "simple"}},
             )
             for ent in entities:
                 label = ent.get("entity_group", ent.get("entity", ""))
-                word = ent.get("word", "").strip()
-                # Clean up word (e.g. remove leading ## from subwords if aggregation didn't fully work)
-                word = word.lstrip("# ")
+                word = ent.get("word", "").strip().lstrip("# ")
                 if label in ("PER", "B-PER", "I-PER", "PERSON"):
                     out["PERSON"].append(word)
                 elif label in ("ORG", "B-ORG", "I-ORG"):
@@ -227,12 +317,13 @@ def _run_ner(text: str) -> Dict[str, List[str]]:
                 elif label in ("LOC", "B-LOC", "I-LOC", "GPE"):
                     out["GPE"].append(word)
         except Exception as e:
-            logger.error("Failed to get NER for a chunk: %s", e)
+            logger.error("NER failed for chunk: %s", e)
 
     return out
 
 
 # ── Skills ─────────────────────────────────────────────────────────────────────
+
 _TECH = {
     "python", "javascript", "typescript", "java", "c++", "c#", "go", "rust",
     "php", "ruby", "swift", "kotlin", "scala", "r", "sql", "bash", "react",
@@ -248,14 +339,14 @@ _SOFT = {
     "critical thinking", "creativity", "adaptability", "time management",
     "negotiation", "collaboration", "organisation", "organization",
     "attention to detail", "analytical", "presentation", "mentoring",
-    "coaching", "conflict resolution", "decision making",
+    "coaching", "conflict resolution", "decision making", "curriculum development",
+    "classroom management", "data analysis", "technology integration",
 }
 
 
 def _classify_skills(lines: List[str]) -> Tuple[List[str], List[str]]:
     technical, non_technical = [], []
     for line in lines:
-        # Strip only a leading "Label: " or "Label - " prefix (word chars up to first colon/dash)
         cleaned = re.sub(r"^[A-Za-z ]{1,30}[:\-]\s*", "", line, count=1)
         for part in re.split(r"[,|•·\t]+", cleaned):
             p = part.strip(" -–•·\t")
@@ -263,35 +354,54 @@ def _classify_skills(lines: List[str]) -> Tuple[List[str], List[str]]:
                 continue
             if p.lower() in _SOFT or any(s in p.lower() for s in _SOFT):
                 non_technical.append(p)
-            else:
+            elif p.lower() in _TECH or any(t in p.lower() for t in _TECH):
                 technical.append(p)
+            else:
+                # Default unrecognised items to non-technical
+                non_technical.append(p)
     return technical, non_technical
 
 
 # ── Experience ─────────────────────────────────────────────────────────────────
+
 def _parse_experience(lines: List[str], orgs: List[str]) -> List[Experience]:
     blocks: List[Experience] = []
     current: Optional[Dict[str, Any]] = None
 
     for line in lines:
         start, end = _parse_date_range(line)
-        is_anchor = start is not None or any(o.lower() in line.lower() for o in orgs if len(o) > 2)
+        matched_org = next((o for o in orgs if len(o) > 2 and o.lower() in line.lower()), None)
+        is_anchor = start is not None or matched_org is not None
 
         if is_anchor:
             if current:
                 blocks.append(Experience(**current))
+
+            # FIX 4: Extract title directly from the anchor line by stripping
+            # the org name and date range — what remains is usually the job title.
+            raw_title = line
+            if matched_org:
+                raw_title = re.sub(re.escape(matched_org), "", raw_title, flags=re.I)
+            if start:
+                raw_title = _DATE_RANGE_RE.sub("", raw_title)
+                raw_title = _DATE_RE.sub("", raw_title)
+            title = raw_title.strip(" ,–-|") or None
+
             current = {
-                "company":     next((o for o in orgs if o.lower() in line.lower()), None),
-                "title":       None,
+                "company":     matched_org,
+                "title":       title,
                 "startDate":   start,
                 "endDate":     end,
                 "description": None,
             }
         elif current is not None:
-            if current["title"] is None and len(line) < 80:
+            # If title still missing and line is short and has no date, use it
+            if current["title"] is None and len(line) < 80 and not _DATE_RE.search(line):
                 current["title"] = line
             else:
-                current["description"] = ((current["description"] or "") + " " + line).strip()
+                current["description"] = (
+                    ((current["description"] or "") + " " + line).strip()
+                )
 
     if current:
         blocks.append(Experience(**current))
@@ -299,6 +409,7 @@ def _parse_experience(lines: List[str], orgs: List[str]) -> List[Experience]:
 
 
 # ── Education ──────────────────────────────────────────────────────────────────
+
 def _parse_education(lines: List[str], orgs: List[str]) -> List[Education]:
     blocks: List[Education] = []
     current: Optional[Dict[str, Any]] = None
@@ -306,13 +417,14 @@ def _parse_education(lines: List[str], orgs: List[str]) -> List[Education]:
     for line in lines:
         start, end = _parse_date_range(line)
         dm = _DEGREE_RE.search(line)
-        is_anchor = dm is not None or any(o.lower() in line.lower() for o in orgs if len(o) > 2)
+        matched_org = next((o for o in orgs if len(o) > 2 and o.lower() in line.lower()), None)
+        is_anchor = dm is not None or matched_org is not None
 
         if is_anchor:
             if current:
                 blocks.append(Education(**current))
             current = {
-                "institution": next((o for o in orgs if o.lower() in line.lower()), None),
+                "institution": matched_org,
                 "degree":      dm.group(0).capitalize() if dm else None,
                 "field":       None,
                 "startDate":   start,
@@ -332,6 +444,7 @@ def _parse_education(lines: List[str], orgs: List[str]) -> List[Education]:
 
 
 # ── Languages ──────────────────────────────────────────────────────────────────
+
 _KNOWN_LANGS = {
     "english", "arabic", "french", "german", "spanish", "italian",
     "portuguese", "russian", "chinese", "japanese", "korean", "turkish",
@@ -351,13 +464,15 @@ def _extract_languages(lines: Optional[List[str]], fallback_text: str = "") -> L
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
+
 def parse(cv_text: str) -> ParsedData:
     """Parse raw CV text → structured ParsedData."""
     lines = [l.strip() for l in cv_text.splitlines() if l.strip()]
 
-    email = _extract_email(cv_text)
-    phone = _extract_phone(cv_text)
+    email    = _extract_email(cv_text)
+    phone    = _extract_phone(cv_text)
 
+    # FIX 3: NER now runs over the full text (no chunk[:3] cap)
     ner = _run_ner(cv_text)
     locations    = ner["GPE"] + ner["LOC"]
     location_str = (
@@ -365,15 +480,20 @@ def parse(cv_text: str) -> ParsedData:
         else locations[0] if locations else None
     )
 
+    # FIX 2 + 5: Only heading lines are embedded; threshold raised to 0.60
     buckets = _bucket_lines(lines)
 
     summary_lines = [l for l in buckets["summary"] if len(l) > 40] or buckets["summary"]
     summary = " ".join(summary_lines[:3]).strip() or None
 
     technical, non_technical = _classify_skills(buckets["skills"])
+
+    # FIX 4: Experience parser now extracts title from the anchor line
     experience = _parse_experience(buckets["experience"], ner["ORG"])
     education  = _parse_education(buckets["education"],  ner["ORG"])
-    languages  = _extract_languages(buckets["languages"]) or _extract_languages([], cv_text)
+
+    # so _extract_languages will find them even if the heading wasn't canonical.
+    languages = _extract_languages(buckets["languages"]) or _extract_languages([], cv_text)
 
     return ParsedData(
         fullName=ner["PERSON"][0] if ner["PERSON"] else None,
