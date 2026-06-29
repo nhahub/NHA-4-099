@@ -136,7 +136,7 @@ async def parse_cv(request: UrlParseRequest) -> JSONResponse:
             content={
                 "cvId": request.cvId,
                 "status": "failed",
-                "error": f"Could not download file. URL error: {exc}",
+                "error": f"Could not download file, url:{request.url}",
                 
             }
         )
