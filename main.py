@@ -125,30 +125,63 @@ class ResultRequest(BaseModel):
 
 @app.post("/parse", tags=["CV Pipeline"])
 async def parse_cv(request: UrlParseRequest) -> JSONResponse:
+    # 1. Download File
     try:
+        # NOTE: If download_file is a standard sync function, wrap it so it doesn't block the async loop
         content = download_file(request.url)
     except Exception as exc:
-        raise HTTPException(400, detail=f"Could not download file: {exc}")
+        logger.error("Download failed — cvId=%s: %s", request.cvId, exc)
+        return JSONResponse(
+            status_code=400,
+            content={
+                "cvId": request.cvId,
+                "status": "failed",
+                "error": f"Could not download file. URL error: {exc}",
+                "status_code": 400
+            }
+        )
 
+    # 2. Extract Filename and Text
     url_filename = request.url.split("?")[0].rstrip("/").split("/")[-1] or "downloaded_file"
     try:
         cv_text = _extract_text_from_bytes(content, url_filename)
     except ValueError as exc:
-        raise HTTPException(400, detail=str(exc))
+        logger.warning("Extraction failed (ValueError) — cvId=%s: %s", request.cvId, exc)
+        return JSONResponse(
+            status_code=400,
+            content={
+                "cvId": request.cvId,
+                "status": "failed",
+                "error": str(exc)
+            }
+        )
 
+    # 3. Validate Extracted Content Length
     if len(cv_text.strip()) < 10:
-        raise HTTPException(400, detail="Could not extract enough text from the downloaded file.")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "cvId": request.cvId,
+                "status": "failed",
+                "error": "Could not extract text from the file. File appears to be a scanned image without OCR.",
+                "status_code" : 400 
+            }
+        )
 
+    # 4. Parse CV Data
     try:
         parsed_data = parsing_test.parse(cv_text)
         parsed_dict = parsed_data.model_dump() if hasattr(parsed_data, "model_dump") else parsed_data
-        result = {
-            "cvId": request.cvId,
-            "status": "completed",
-            "parsedData": parsed_dict,
-        }
+        
         logger.info("Parsing complete — cvId=%s", request.cvId)
-        return JSONResponse(status_code=200, content=result)
+        return JSONResponse(
+            status_code=200, 
+            content={
+                "cvId": request.cvId,
+                "status": "completed",
+                "parsedData": parsed_dict,
+            }
+        )
     except Exception as exc:
         logger.error("Parsing failed — cvId=%s: %s", request.cvId, exc, exc_info=True)
         return JSONResponse(
@@ -159,8 +192,6 @@ async def parse_cv(request: UrlParseRequest) -> JSONResponse:
                 "error": str(exc),
             }
         )
-
-
 # ── Results Endpoint ───────────────────────────────────────────────────────────
 
 @app.post("/results", tags=["CV Pipeline"])
