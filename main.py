@@ -130,7 +130,7 @@ async def parse_cv(request: UrlParseRequest) -> JSONResponse:
         # NOTE: If download_file is a standard sync function, wrap it so it doesn't block the async loop
         content = download_file(request.url)
     except Exception as exc:
-        logger.error("Download failed — cvId=%s: %s", request.cvId, exc)
+        #logger.error("Download failed — cvId=%s: %s", request.cvId, exc)
         return JSONResponse(
             status_code=400,
             content={
