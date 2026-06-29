@@ -19,9 +19,14 @@ class ParseAccepted(BaseModel):
     message: str = "CV queued for parsing. Result will be saved locally."
 
 
+class SkillItem(BaseModel):
+    name: str
+    level: Optional[str] = Field(None, description="Beginner, Intermediate, or Advanced")
+
+
 class Skills(BaseModel):
-    technical: List[str] = Field(default_factory=list)
-    nonTechnical: List[str] = Field(default_factory=list)
+    technical: List[SkillItem] = Field(default_factory=list)
+    nonTechnical: List[SkillItem] = Field(default_factory=list)
 
 
 class Experience(BaseModel):
@@ -32,10 +37,32 @@ class Experience(BaseModel):
     description: Optional[str] = None
 
 
+class Project(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    technologies: List[str] = Field(default_factory=list)
+    url: Optional[str] = None
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+
+
+class Certification(BaseModel):
+    name: Optional[str] = None
+    issuer: Optional[str] = None
+    date: Optional[str] = None
+
+
+class Links(BaseModel):
+    github: Optional[str] = None
+    linkedin: Optional[str] = None
+    portfolio: Optional[str] = None
+
+
 class Education(BaseModel):
     institution: Optional[str] = None
     degree: Optional[str] = None
     field: Optional[str] = None
+    major: Optional[str] = None
     startDate: Optional[str] = None
     endDate: Optional[str] = None
 
@@ -48,8 +75,11 @@ class ParsedData(BaseModel):
     summary: Optional[str] = None
     skills: Skills = Field(default_factory=Skills)
     experience: List[Experience] = Field(default_factory=list)
+    projects: List[Project] = Field(default_factory=list)
     education: List[Education] = Field(default_factory=list)
+    certifications: List[Certification] = Field(default_factory=list)
     languages: List[str] = Field(default_factory=list)
+    links: Optional[Links] = None
 
 
 class WebhookPayload(BaseModel):

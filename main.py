@@ -3,6 +3,7 @@ import logging
 import multiprocessing
 import os
 from typing import Any, Dict
+import docx
 
 import uvicorn
 from contextlib import asynccontextmanager
@@ -13,7 +14,7 @@ from pydantic import BaseModel
 from pypdf import PdfReader
 
 import config
-import parsing_test
+import core.parsing_test as parsing_test
 from loader import download_file
 
 logging.basicConfig(
@@ -28,6 +29,11 @@ results_store: Dict[str, Any] = {}
 
 
 # ── File helpers ───────────────────────────────────────────────────────────────
+def _extract_text_from_docx(data: bytes) -> str:
+    """Extracts raw text from .docx binary data."""
+    doc = docx.Document(io.BytesIO(data))
+    return "\n".join(paragraph.text for paragraph in doc.paragraphs)
+
 
 def _extract_text_from_pdf(data: bytes) -> str:
     reader = PdfReader(io.BytesIO(data))
@@ -43,8 +49,10 @@ def _extract_text_from_bytes(data: bytes, filename: str) -> str:
             return data.decode("utf-8")
         except UnicodeDecodeError:
             return data.decode("cp1252")
+    elif ext == ".docx":
+        return _extract_text_from_docx(data)
     else:
-        raise ValueError(f"Unsupported file type: {ext}. Use PDF or TXT.")
+        raise ValueError(f"Unsupported file type: {ext}. Use PDF, TXT, or DOCX.")
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
