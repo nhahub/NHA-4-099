@@ -189,22 +189,6 @@ async def parse_cv(request: UrlParseRequest) -> JSONResponse:
                 "error": str(exc),
             }
         )
-# ── Results Endpoint ───────────────────────────────────────────────────────────
-
-@app.post("/results", tags=["CV Pipeline"])
-def get_result(request: ResultRequest) -> JSONResponse:
-    data = results_store.get(request.cvId)
-
-    if not data:
-        raise HTTPException(404, detail="Result not ready yet or cvId invalid")
-
-    if data.get("status") == "processing":
-        raise HTTPException(202, detail="Still processing, try again shortly")
-
-    # Delete from memory after returning
-    results_store.pop(request.cvId, None)
-
-    return JSONResponse(status_code=200, content=data)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
