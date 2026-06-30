@@ -85,14 +85,14 @@ app = FastAPI(
 
 @app.exception_handler(RequestValidationError)
 async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
-    logger.warning("Validation error: %s", exc)
-    return JSONResponse(status_code=422, content={"status": "error", "error_message": str(exc)})
+    logger.warning("Validation error: unprovide url ")
+    return JSONResponse(status_code=422, content={"cvId": None,"status": "faild", "error":"No provided url"})
 
 
 @app.exception_handler(Exception)
 async def unhandled(_: Request, exc: Exception) -> JSONResponse:
     logger.error("Unhandled error: %s", exc, exc_info=True)
-    return JSONResponse(status_code=500, content={"status": "error", "error_message": "Internal server error"})
+    return JSONResponse(status_code=500, content={"cvId": None,"status": "faild", "error": "Internal server error"})
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 
