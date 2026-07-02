@@ -195,4 +195,4 @@ async def parse_cv(request: UrlParseRequest) -> JSONResponse:
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=3000, reload=True)
