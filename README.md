@@ -1,6 +1,5 @@
 ---
 title: CV ATSfeat:
-
 colorFrom: blue
 colorTo: indigo
 sdk: docker
