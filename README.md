@@ -1,6 +1,6 @@
 ---
-title: CV ATS
-emoji: 🚀
+title: CV ATSfeat:
+
 colorFrom: blue
 colorTo: indigo
 sdk: docker
@@ -65,17 +65,3 @@ You can use the provided test script to evaluate a synthetic resume:
 ```bash
 python tests/test_api.py
 ```
-
-## Deployment to Hugging Face Spaces
-
-This repository includes a GitHub Action to automatically sync your `main` branch to a Hugging Face Space Docker environment.
-
-1. Create a Blank Docker Space on [Hugging Face](https://huggingface.co/spaces).
-2. Add your Groq API Key as a Secret named `API_KEY` in the Hugging Face Space settings.
-3. Update the `.github/workflows/sync_to_hf.yml` file with your Hugging Face username and Space name.
-4. Add a GitHub repository secret named `HF_TOKEN` containing your Hugging Face write token.
-5. Push to the `main` branch! GitHub Actions will automatically deploy your API.
-
-## License
-MIT License
-
